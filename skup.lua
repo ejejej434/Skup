@@ -1,6 +1,8 @@
-script_name("LMMR")
+script_name("LMMR Rodina Mobile")
 script_author("major")
-script_version("1.8.3")
+script_version("1.9.0")
+
+local SCRIPT_TAG = "[LMMR RM 1.9.0]"
 
 local imgui_status, imgui = pcall(require, 'mimgui')
 local encoding_status, encoding = pcall(require, 'encoding')
@@ -1587,10 +1589,21 @@ function main()
     load_main_json()
     load_item_db()
     load_logs()
-    sampRegisterChatCommand('cent', function()
-         CentralGlMenu[0] = not CentralGlMenu[0]
-     end)
-    sampAddChatMessage("{00BFFF}[LMMR 1.8.2]{FFFFFF} Ñêðèïò çàãðóæåí. /cent", -1)
+    local function toggle_menu()
+        CentralGlMenu[0] = not CentralGlMenu[0]
+    end
+
+    if sampRegisterChatCommand then
+        sampRegisterChatCommand('cent', toggle_menu)
+    end
+
+    if sampAddChatMessage then
+        sampAddChatMessage(
+            "{00BFFF}" .. SCRIPT_TAG .. "{FFFFFF} Script loaded. Command: /cent",
+            -1
+        )
+    end
+
     while true do
          wait(0)
      end
