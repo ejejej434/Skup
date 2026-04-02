@@ -222,6 +222,11 @@ if sampev_status then
             show_dialog_240_window[0] = true
             return false
         end
+
+        if lower_text:find("êóïèë") or lower_text:find("ïðîäàë") or lower_text:find("ïðèîáðåë") or lower_text:find("óñïåøíî") then
+            local clean_text = text:gsub("{%x%x%x%x%x%x}", "")
+            addLog("{00FFFF}[ÑÄÅËÊÀ] {FFFFFF}" .. clean_text)
+        end
     end
 
     function sampev.onSendDialogResponse(dialogId, button, listbox, input)
@@ -232,10 +237,6 @@ if sampev_status then
                 upsert_sale_template(dialog240_item_name, dialog240_item_id, tostring(second), tostring(first))
                 save_main_json()
             end
-        end
-        if lower_text:find("êóïèë") or lower_text:find("ïðîäàë") or lower_text:find("ïðèîáðåë") or lower_text:find("óñïåøíî") then
-            local clean_text = text:gsub("{%x%x%x%x%x%x}", "")
-            addLog("{00FFFF}[ÑÄÅËÊÀ] {FFFFFF}" .. clean_text)
         end
     end
     
@@ -588,7 +589,7 @@ imgui.OnInitialize(function()
     style.ItemSpacing = imgui.ImVec2(12, 12)
 end)
 
-imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_custom_lavka[0] end, function()
+imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_custom_lavka[0] or show_dialog_240_window[0] end, function()
     local resX = imgui.GetIO().DisplaySize.x
     local resY = imgui.GetIO().DisplaySize.y
     
@@ -793,13 +794,63 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
         end
         
         imgui.Spacing()
+
+        imgui.TextDisabled(u8"Ïðåêðàòèòü:")
+        
+        imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0.8, 0.2, 0.2, 0.7))
+        imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.ImVec4(0.9, 0.3, 0.3, 1.0))
+        if imgui.Button(u8"Ñêóï", imgui.ImVec2(tBtnW, btnH)) then
+            sampSendDialogResponse(9, 1, 2, "")
+            show_custom_lavka[0] = false
+        end
+        imgui.SameLine()
+        if imgui.Button(u8"Àðåíäó", imgui.ImVec2(tBtnW, btnH)) then
+            sampSendDialogResponse(9, 1, 6, "")
+            show_custom_lavka[0] = false
+        end
+        imgui.PopStyleColor(2)
+        
+        imgui.EndChild()
+        
+        imgui.End()
+        imgui.PopStyleVar(3)
+        imgui.PopStyleColor(8)
+    end
+    
     if show_dialog_240_window[0] then
-        local quickW, quickH = 420, 250
+        local quickW = math.min(560, resX * 0.78)
+        local quickH = math.min(330, resY * 0.65)
+
+        imgui.PushStyleColor(imgui.Col.WindowBg, imgui.ImVec4(cBg[0], cBg[1], cBg[2], menu_opacity[0]))
+        imgui.PushStyleColor(imgui.Col.ChildBg, imgui.ImVec4(cBg[0] + 0.03, cBg[1] + 0.03, cBg[2] + 0.03, menu_opacity[0] * 0.75))
+        imgui.PushStyleColor(imgui.Col.Text, imgui.ImVec4(1.0, 1.0, 1.0, 1.0))
+        imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(cAcc[0], cAcc[1], cAcc[2], 0.85))
+        imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.ImVec4(cAcc[0], cAcc[1], cAcc[2], 1.0))
+        imgui.PushStyleColor(imgui.Col.ButtonActive, imgui.ImVec4(cAcc[0] - 0.1, cAcc[1] - 0.1, cAcc[2] - 0.1, 1.0))
+        imgui.PushStyleColor(imgui.Col.Border, imgui.ImVec4(cAcc[0], cAcc[1], cAcc[2], 0.3))
+        imgui.PushStyleVarFloat(imgui.StyleVar.WindowRounding, 15.0)
+        imgui.PushStyleVarFloat(imgui.StyleVar.FrameRounding, 8.0)
+
         imgui.SetNextWindowSize(imgui.ImVec2(quickW, quickH), imgui.Cond.Always)
         imgui.SetNextWindowPos(imgui.ImVec2(resX / 2, resY / 2), imgui.Cond.Always, imgui.ImVec2(0.5, 0.5))
-        imgui.Begin("##Dialog240Helper", show_dialog_240_window, imgui.WindowFlags.NoResize + imgui.WindowFlags.NoCollapse)
+        imgui.Begin("##Dialog240Helper", show_dialog_240_window, imgui.WindowFlags.NoTitleBar + imgui.WindowFlags.NoResize + imgui.WindowFlags.NoMove)
 
-        imgui.TextColored(imgui.ImVec4(cAcc[0], cAcc[1], cAcc[2], 1.0), "Dialog 240 - sale")
+        local titleText = "DIALOG 240"
+        local titleW = imgui.CalcTextSize(titleText).x
+        imgui.SetCursorPos(imgui.ImVec2((quickW - titleW) / 2, 14))
+        imgui.TextColored(imgui.ImVec4(cAcc[0], cAcc[1], cAcc[2], 1.0), titleText)
+
+        imgui.SetCursorPos(imgui.ImVec2(quickW - 35, 10))
+        imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0, 0, 0, 0))
+        imgui.PushStyleColor(imgui.Col.Text, imgui.ImVec4(1.0, 0.3, 0.3, 1.0))
+        if imgui.Button("X", imgui.ImVec2(25, 25)) then
+            show_dialog_240_window[0] = false
+            sampSendDialogResponse(240, 0, 0, "")
+        end
+        imgui.PopStyleColor(2)
+
+        imgui.SetCursorPos(imgui.ImVec2(15, 50))
+        imgui.BeginChild("Dialog240Body", imgui.ImVec2(quickW - 30, quickH - 65), true)
         local info = dialog240_item_name ~= "" and dialog240_item_name or "Unknown item"
         if dialog240_item_id ~= "" then
             info = info .. " [" .. dialog240_item_id .. "]"
@@ -811,6 +862,7 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
         imgui.InputText("##d240_price", dialog240_price, 64)
         imgui.Text("Amount")
         imgui.InputText("##d240_amount", dialog240_amount, 64)
+        imgui.Spacing()
 
         if imgui.Button("Normal sale", imgui.ImVec2(-1, 35)) then
             local price = ffi.string(dialog240_price)
@@ -840,31 +892,12 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
             sampSendDialogResponse(240, 0, 0, "")
         end
 
+        imgui.EndChild()
         imgui.End()
+        imgui.PopStyleVar(2)
+        imgui.PopStyleColor(7)
     end
 
-        imgui.TextDisabled(u8"Ïðåêðàòèòü:")
-        
-        imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0.8, 0.2, 0.2, 0.7))
-        imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.ImVec4(0.9, 0.3, 0.3, 1.0))
-        if imgui.Button(u8"Ñêóï", imgui.ImVec2(tBtnW, btnH)) then
-            sampSendDialogResponse(9, 1, 2, "")
-            show_custom_lavka[0] = false
-        end
-        imgui.SameLine()
-        if imgui.Button(u8"Àðåíäó", imgui.ImVec2(tBtnW, btnH)) then
-            sampSendDialogResponse(9, 1, 6, "")
-            show_custom_lavka[0] = false
-        end
-        imgui.PopStyleColor(2)
-        
-        imgui.EndChild()
-        
-        imgui.End()
-        imgui.PopStyleVar(3)
-        imgui.PopStyleColor(8)
-    end
-    
     if imgui.IsMouseReleased(0) then
         global_drag_active = false
     end
