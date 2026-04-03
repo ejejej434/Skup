@@ -1526,6 +1526,9 @@ end)
 
 function main()
     while not isSampAvailable() do wait(100) end
+     sampRegisterChatCommand("cent", function()
+        CentralGlMenu[0] = not CentralGlMenu[0]
+    end)
     load_main_json()
     load_item_db()
     load_logs()
