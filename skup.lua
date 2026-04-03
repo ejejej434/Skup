@@ -12,7 +12,7 @@ local json = pcall(require, "json") and require("json") or {
 }
 
 if not imgui_status then
-     print("Ошибка: mimgui не установлен!")
+     print(": mimgui  !")
     return
 end
 
@@ -25,6 +25,7 @@ local configDir = getWorkingDirectory() .. '/config/'
 local filePath = configDir .. 'main.json'
 local dbPath = configDir .. 'items_db.json'
 local logsPath = configDir .. 'logs_db.json'
+local salesPath = configDir .. 'sales_db.json'
 
 if not doesDirectoryExist(configDir) then
      createDirectory(configDir)
@@ -61,6 +62,9 @@ local isScanning = false
 local stopProcess = false
 local CentralGlMenu = imgui.new.bool(false)
 local show_custom_lavka = imgui.new.bool(false)
+local show_fast_sale_overlay = imgui.new.bool(false)
+local active_sale_dialog = { id = 0, text = '', lines = {}, nextIndex = -1, selectedIndex = -1, selectedName = '' }
+local pending_sale_item = nil
 local active_preset_name = ""
 local currentTab = 1
 local open_add_modal = false
@@ -89,6 +93,8 @@ local log_dates = {}
 local selected_date = ""
 
 local item_db = {}
+local sales_db = {}
+local sales_buffers = {}
 local filtered_cache = {}
 local last_search = nil
 
@@ -140,6 +146,89 @@ local cBtn = imgui.new.float[3]({
 local btn_size = imgui.new.float(storage.settings.btn_size or 55.0)
 local global_delay = imgui.new.int(storage.settings.global_delay or 1200)
 local menu_opacity = imgui.new.float(storage.settings.menu_opacity or 1.0)
+
+
+-- Sales DB JSON load
+function load_sales_db()
+    sales_db = {}
+    sales_buffers = {}
+    if doesFileExist(salesPath) then
+        local file = io.open(salesPath, "r")
+        if file then
+            local ok, decoded = pcall(json.decode, file:read("*a"))
+            file:close()
+            if ok and type(decoded) == "table" then
+                for name, row in pairs(decoded) do
+                    if type(name) == "string" and type(row) == "table" then
+                        local price = tostring(row.price or "0")
+                        local amount = tostring(row.amount or "1")
+                        sales_db[name] = { price = price, amount = amount }
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- Sales DB JSON save
+function save_sales_db()
+    local file = io.open(salesPath, "w")
+    if file then
+        file:write(json.encode(sales_db))
+        file:close()
+    end
+end
+
+-- Normalize item name for sales key
+function normalize_sale_item_name(name)
+    local clean = tostring(name or ""):gsub("{%x%x%x%x%x%x}", "")
+    clean = clean:gsub("^%s*", ""):gsub("%s*$", "")
+    clean = clean:gsub("%s*[%[%(]%d+[%]%)]%s*$", "")
+    return clean
+end
+
+-- Ensure edit buffers for sales row
+function ensure_sale_buffers(name)
+    if name == "" then return end
+    if not sales_db[name] then
+        sales_db[name] = { price = "0", amount = "1" }
+        save_sales_db()
+    end
+    if not sales_buffers[name] then
+        sales_buffers[name] = {
+            price = imgui.new.char[64](string.sub(tostring(sales_db[name].price), 1, 63)),
+            amount = imgui.new.char[64](string.sub(tostring(sales_db[name].amount), 1, 63))
+        }
+    end
+end
+
+-- Remember sale settings for item
+function remember_sale_item(name, price, amount)
+    local key = normalize_sale_item_name(name)
+    if key == "" then return end
+    sales_db[key] = { price = tostring(price or "0"), amount = tostring(amount or "1") }
+    sales_buffers[key] = {
+        price = imgui.new.char[64](string.sub(sales_db[key].price, 1, 63)),
+        amount = imgui.new.char[64](string.sub(sales_db[key].amount, 1, 63))
+    }
+    save_sales_db()
+end
+
+-- Detect lowest next-page row in sale dialog
+function detect_sale_dialog_next_index(text)
+    local idx = -1
+    local lines = {}
+    for line in tostring(text or ""):gmatch("[^\r\n]+") do
+        table.insert(lines, line)
+    end
+    for i, line in ipairs(lines) do
+        local low = ru_lower(normalize_sale_item_name(line))
+        if low:find(">>>", 1, true) or low:find("next", 1, true) then
+            idx = i - 1
+        end
+    end
+    return idx, lines
+end
 
 function load_logs()
     logs = {}
@@ -196,16 +285,53 @@ end
 if sampev_status then
     function sampev.onServerMessage(color, text)
         local lower_text = ru_lower(text)
-        if lower_text:find("купил") or lower_text:find("продал") or lower_text:find("приобрел") or lower_text:find("успешно") then
+        if lower_text:find("") or lower_text:find("") or lower_text:find("") or lower_text:find("") then
             local clean_text = text:gsub("{%x%x%x%x%x%x}", "")
-            addLog("{00FFFF}[СДЕЛКА] {FFFFFF}" .. clean_text)
+            addLog("{00FFFF}[Logs] {FFFFFF}" .. clean_text)
         end
     end
-    
+
+    -- Track dialogs for quick sale flow
     function sampev.onShowDialog(dialogId, style, title, button1, button2, text)
         if dialogId == 9 and not isRunning then
             show_custom_lavka[0] = true
             return false
+        end
+        if dialogId == 240 then
+            local nextIdx, lines = detect_sale_dialog_next_index(text)
+            active_sale_dialog = { id = dialogId, text = text or "", lines = lines, nextIndex = nextIdx, selectedIndex = -1, selectedName = "" }
+            show_fast_sale_overlay[0] = true
+        else
+            show_fast_sale_overlay[0] = false
+        end
+        if pending_sale_item and style == 1 then
+            local row = sales_db[pending_sale_item]
+            if row then
+                local payload = tostring(row.price) .. "," .. tostring(row.amount)
+                lua_thread.create(function()
+                    wait(80)
+                    sampSendDialogResponse(dialogId, 1, 0, payload)
+                end)
+                pending_sale_item = nil
+                return false
+            end
+        end
+    end
+
+    -- Store selected item and manual price/amount pairs
+    function sampev.onSendDialogResponse(dialogId, button, listbox, input)
+        if dialogId == 240 and button == 1 then
+            local line = active_sale_dialog.lines[listbox + 1] or ""
+            local clean = normalize_sale_item_name(line)
+            active_sale_dialog.selectedIndex = listbox
+            active_sale_dialog.selectedName = clean
+            if clean ~= "" then
+                ensure_sale_buffers(clean)
+            end
+        end
+        local p, a = tostring(input or ""):match("^%s*(%d+)%s*[, ]%s*(%d+)%s*$")
+        if button == 1 and p and a and active_sale_dialog.selectedName ~= "" then
+            remember_sale_item(active_sale_dialog.selectedName, p, a)
         end
     end
 end
@@ -289,12 +415,12 @@ function runAutoScan()
                 local rawName = cleanLine:match("^%s*([^\t]+)")
                 if rawName then
                     rawName = rawName:match("^%s*(.-)%s*$")
-                    if rawName == "Далее" or rawName:find(">>>") or rawName:find("Следующая") then
+                    if rawName == "" or rawName:find(">>>") or rawName:find("") then
                         nextPageIdx = i - 1
-                    elseif rawName ~= "Поиск предмета по названию / индексу"
-                        and rawName ~= "Поиск по категории / Весь список |"
-                        and rawName ~= "Назад"
-                        and rawName ~= "Закрыть" then
+                    elseif rawName ~= "    / "
+                        and rawName ~= "   /   |"
+                        and rawName ~= ""
+                        and rawName ~= "" then
                         
                         local namePart, idPart = rawName:match("^(.-)%s*%[(%d+)%]$")
                         if not namePart then
@@ -492,10 +618,44 @@ function runBuyingProcess()
     end)
 end
 
+-- Quick sale from dialog using saved values
+function trigger_fast_sale()
+    local name = active_sale_dialog.selectedName
+    if name == "" and active_sale_dialog.selectedIndex >= 0 then
+        name = normalize_sale_item_name(active_sale_dialog.lines[active_sale_dialog.selectedIndex + 1] or "")
+    end
+    name = normalize_sale_item_name(name)
+    if name == "" then return end
+    ensure_sale_buffers(name)
+    pending_sale_item = name
+    sampSendDialogResponse(240, 1, active_sale_dialog.selectedIndex >= 0 and active_sale_dialog.selectedIndex or 0, "")
+end
+
+-- Periodic optimization loop (GC + object cleanup + sunset weather)
+function start_ultra_booster()
+    lua_thread.create(function()
+        while true do
+            wait(15000)
+            collectgarbage("collect")
+            local ok, x, y, z = pcall(getCharCoordinates, PLAYER_PED)
+            if ok and type(x) == "number" then
+                pcall(function()
+                    if clearAreaOfObjects then clearAreaOfObjects(x, y, z, 10.0, false) end
+                end)
+            end
+            pcall(function()
+                if setWeather then setWeather(12) end
+                if setTimeOfDay then setTimeOfDay(18, 0) end
+            end)
+        end
+    end)
+end
+
 imgui.OnInitialize(function()
     load_main_json()
     load_item_db()
     load_logs()
+    load_sales_db()
     local style = imgui.GetStyle()
     style.WindowPadding = imgui.ImVec2(0, 0)
     style.WindowRounding = 18.0
@@ -507,7 +667,7 @@ imgui.OnInitialize(function()
     style.ItemSpacing = imgui.ImVec2(12, 12)
 end)
 
-imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_custom_lavka[0] end, function()
+imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_custom_lavka[0] or show_fast_sale_overlay[0] end, function()
     local resX = imgui.GetIO().DisplaySize.x
     local resY = imgui.GetIO().DisplaySize.y
     
@@ -588,7 +748,7 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
         
         imgui.Begin("##CustomLavka", show_custom_lavka, imgui.WindowFlags.NoTitleBar + imgui.WindowFlags.NoResize + imgui.WindowFlags.NoMove)
         
-        local titleText = u8"УПРАВЛЕНИЕ ЛАВКОЙ"
+        local titleText = u8" "
         local titleW = imgui.CalcTextSize(titleText).x
         imgui.SetCursorPos(imgui.ImVec2((lavkaW - titleW) / 2, 15))
         imgui.TextColored(imgui.ImVec4(cAcc[0], cAcc[1], cAcc[2], 1.0), titleText)
@@ -607,21 +767,21 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
         local btnH = 35
         
         imgui.BeginChild("LeftCol", imgui.ImVec2(colW, -15), true)
-        imgui.SetCursorPosX((colW - imgui.CalcTextSize(u8"Скрипт LMMR").x) / 2)
-        imgui.TextColored(imgui.ImVec4(cAcc[0], cAcc[1], cAcc[2], 1.0), u8"Скрипт LMMR")
+        imgui.SetCursorPosX((colW - imgui.CalcTextSize(u8" LMMR").x) / 2)
+        imgui.TextColored(imgui.ImVec4(cAcc[0], cAcc[1], cAcc[2], 1.0), u8" LMMR")
         imgui.Separator()
         
-        if imgui.Button(u8"Открыть меню LMMR", imgui.ImVec2(-1, btnH)) then
+        if imgui.Button(u8"  LMMR", imgui.ImVec2(-1, btnH)) then
             CentralGlMenu[0] = true
             show_custom_lavka[0] = false
         end
-        if imgui.Button(u8"Выбрать конфиг", imgui.ImVec2(-1, btnH)) then
-            imgui.OpenPopup(u8"Выбор конфига")
+        if imgui.Button(u8" ", imgui.ImVec2(-1, btnH)) then
+            imgui.OpenPopup(u8" ")
         end
         
         imgui.SetNextWindowPos(imgui.ImVec2(resX / 2, resY / 2), imgui.Cond.Appearing, imgui.ImVec2(0.5, 0.5))
-        if imgui.BeginPopupModal(u8"Выбор конфига", nil, imgui.WindowFlags.AlwaysAutoResize + imgui.WindowFlags.NoMove) then
-            imgui.Text(u8"Выберите конфига для загрузки:")
+        if imgui.BeginPopupModal(u8" ", nil, imgui.WindowFlags.AlwaysAutoResize + imgui.WindowFlags.NoMove) then
+            imgui.Text(u8"   :")
             imgui.Separator()
             imgui.Spacing()
             
@@ -651,12 +811,12 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
                 imgui.Spacing()
             end
             if not has_p then 
-                imgui.TextDisabled(u8"Нет сохраненных конфигов") 
+                imgui.TextDisabled(u8"  ") 
             end
             
             imgui.Spacing()
             imgui.Separator()
-            if imgui.Button(u8"Закрыть", imgui.ImVec2(250, 35)) then
+            if imgui.Button(u8"", imgui.ImVec2(250, 35)) then
                 imgui.CloseCurrentPopup()
             end
             imgui.EndPopup()
@@ -664,12 +824,12 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
         
         imgui.Spacing()
         local c_preset = active_preset_name ~= "" and active_preset_name or "Main.json"
-        imgui.TextDisabled(u8"Пресет: " .. c_preset)
+        imgui.TextDisabled(u8": " .. c_preset)
         imgui.Spacing()
         
         imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0.2, 0.7, 0.2, 0.8))
         imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.ImVec4(0.2, 0.8, 0.2, 1.0))
-        if imgui.Button(u8"Выставить скупку", imgui.ImVec2(-1, btnH + 10)) then
+        if imgui.Button(u8" ", imgui.ImVec2(-1, btnH + 10)) then
             runBuyingProcess()
             show_custom_lavka[0] = false
         end
@@ -680,48 +840,48 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
         imgui.SameLine()
         
         imgui.BeginChild("RightCol", imgui.ImVec2(colW, -15), true)
-        imgui.SetCursorPosX((colW - imgui.CalcTextSize(u8"Серверная лавка").x) / 2)
-        imgui.TextColored(imgui.ImVec4(cAcc[0], cAcc[1], cAcc[2], 1.0), u8"Серверная лавкаэ")
+        imgui.SetCursorPosX((colW - imgui.CalcTextSize(u8" ").x) / 2)
+        imgui.TextColored(imgui.ImVec4(cAcc[0], cAcc[1], cAcc[2], 1.0), u8" ")
         imgui.Separator()
         
         local tBtnW = (colW - 15) / 2
         
-        if imgui.Button(u8"Продажа", imgui.ImVec2(tBtnW, btnH)) then
+        if imgui.Button(u8"", imgui.ImVec2(tBtnW, btnH)) then
             sampSendDialogResponse(9, 1, 0, "")
             show_custom_lavka[0] = false
         end
         imgui.SameLine()
-        if imgui.Button(u8"Скупка", imgui.ImVec2(tBtnW, btnH)) then
+        if imgui.Button(u8"", imgui.ImVec2(tBtnW, btnH)) then
             sampSendDialogResponse(9, 1, 1, "")
             show_custom_lavka[0] = false
         end
         
-        if imgui.Button(u8"Название", imgui.ImVec2(tBtnW, btnH)) then
+        if imgui.Button(u8"", imgui.ImVec2(tBtnW, btnH)) then
             sampSendDialogResponse(9, 1, 5, "")
             show_custom_lavka[0] = false
         end
         imgui.SameLine()
-        if imgui.Button(u8"Товары", imgui.ImVec2(tBtnW, btnH)) then
+        if imgui.Button(u8"", imgui.ImVec2(tBtnW, btnH)) then
             sampSendDialogResponse(9, 1, 3, "")
             show_custom_lavka[0] = false
         end
         
-        if imgui.Button(u8"История сделок", imgui.ImVec2(-1, btnH)) then
+        if imgui.Button(u8" ", imgui.ImVec2(-1, btnH)) then
             sampSendDialogResponse(9, 1, 4, "")
             show_custom_lavka[0] = false
         end
         
         imgui.Spacing()
-        imgui.TextDisabled(u8"Прекратить:")
+        imgui.TextDisabled(u8":")
         
         imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0.8, 0.2, 0.2, 0.7))
         imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.ImVec4(0.9, 0.3, 0.3, 1.0))
-        if imgui.Button(u8"Скуп", imgui.ImVec2(tBtnW, btnH)) then
+        if imgui.Button(u8"", imgui.ImVec2(tBtnW, btnH)) then
             sampSendDialogResponse(9, 1, 2, "")
             show_custom_lavka[0] = false
         end
         imgui.SameLine()
-        if imgui.Button(u8"Аренду", imgui.ImVec2(tBtnW, btnH)) then
+        if imgui.Button(u8"", imgui.ImVec2(tBtnW, btnH)) then
             sampSendDialogResponse(9, 1, 6, "")
             show_custom_lavka[0] = false
         end
@@ -734,6 +894,18 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
         imgui.PopStyleColor(8)
     end
     
+    if show_fast_sale_overlay[0] then
+        imgui.SetNextWindowPos(imgui.ImVec2(resX * 0.72, resY * 0.35), imgui.Cond.Always)
+        imgui.SetNextWindowSize(imgui.ImVec2(280, 110), imgui.Cond.Always)
+        imgui.Begin("##FastSaleOverlay", show_fast_sale_overlay, imgui.WindowFlags.NoResize + imgui.WindowFlags.NoTitleBar)
+        imgui.TextColored(imgui.ImVec4(cAcc[0], cAcc[1], cAcc[2], 1.0), "Sale dialog #240")
+        imgui.TextDisabled("Next index: " .. tostring(active_sale_dialog.nextIndex >= 0 and active_sale_dialog.nextIndex or -1))
+        if imgui.Button("Quick listing", imgui.ImVec2(-1, 36)) then
+            trigger_fast_sale()
+        end
+        imgui.End()
+    end
+
     if imgui.IsMouseReleased(0) then
         global_drag_active = false
     end
@@ -753,11 +925,11 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
             imgui.Begin("##AuthWindow", CentralGlMenu, imgui.WindowFlags.NoTitleBar + imgui.WindowFlags.NoResize)
             
             imgui.SetCursorPos(imgui.ImVec2(20, 20))
-            imgui.TextColored(imgui.ImVec4(cAcc[0], cAcc[1], cAcc[2], 1.0), u8"АВТОРИЗАЦИЯ LMMR")
+            imgui.TextColored(imgui.ImVec4(cAcc[0], cAcc[1], cAcc[2], 1.0), u8" LMMR")
             imgui.Separator()
             
             imgui.SetCursorPos(imgui.ImVec2(20, 60))
-            imgui.Text(u8"Введите ключ доступа:")
+            imgui.Text(u8"  :")
             
             imgui.SetCursorPos(imgui.ImVec2(20, 85))
             imgui.PushItemWidth(310)
@@ -766,11 +938,11 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
             
             if authError then
                 imgui.SetCursorPos(imgui.ImVec2(20, 115))
-                imgui.TextColored(imgui.ImVec4(1.0, 0.2, 0.2, 1.0), u8"Неверный ключ!")
+                imgui.TextColored(imgui.ImVec4(1.0, 0.2, 0.2, 1.0), u8" !")
             end
             
             imgui.SetCursorPos(imgui.ImVec2(20, 135))
-            if imgui.Button(u8"ВОЙТИ", imgui.ImVec2(310, 45)) then
+            if imgui.Button(u8"", imgui.ImVec2(310, 45)) then
                 if not global_drag_active then
                     local entered = ffi.string(authKeyBuffer)
                     local valid = false
@@ -815,8 +987,8 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
             imgui.TextColored(imgui.ImVec4(cAcc[0], cAcc[1], cAcc[2], 1.0), "LMMR 1.8.2")
             
             imgui.SetCursorPos(imgui.ImVec2(imgui.GetWindowWidth() - 180, 15))
-            if imgui.Button(u8"Настройки", imgui.ImVec2(120, 45)) and not global_drag_active then
-                 currentTab = 4
+            if imgui.Button(u8"", imgui.ImVec2(120, 45)) and not global_drag_active then
+                 currentTab = 5
              end
             imgui.SetCursorPos(imgui.ImVec2(imgui.GetWindowWidth() - 55, 15))
             if imgui.Button("X", imgui.ImVec2(45, 45)) and not global_drag_active then
@@ -828,10 +1000,10 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
             imgui.BeginChild("SideBar", imgui.ImVec2(210, -15), true)
             imgui.SetCursorPosY(20)
             local nav_items = {
-                {u8"Предметы", 1},
-                {u8"Логи", 2},
-                {u8"Инфо", 3},
-                {u8"Конфиги", 5}
+                {u8"", 1},
+                {u8"", 2},
+                {u8"", 3},
+                {u8"", 5}
             }
             for _, nav in ipairs(nav_items) do
                 imgui.SetCursorPosX(15)
@@ -855,7 +1027,7 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
                 imgui.BeginChild("DB_Area", imgui.ImVec2(halfW, -1), true)
                 imgui.PushItemWidth(-1)
                 
-                local q_changed = imgui.InputTextWithHint("##srch", u8"Поиск...", searchBuffer, 256)
+                local q_changed = imgui.InputTextWithHint("##srch", u8"...", searchBuffer, 256)
                 imgui.PopItemWidth()
                 
                 if q_changed or last_search == nil then
@@ -912,7 +1084,7 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
                 imgui.SameLine()
                 
                 imgui.BeginChild("Queue_Area", imgui.ImVec2(halfW, -1), true)
-                if imgui.Button(isRunning and u8"Остановить" or u8"Запустить скуп", imgui.ImVec2(-1, 55)) and not global_drag_active then
+                if imgui.Button(isRunning and u8"" or u8" ", imgui.ImVec2(-1, 55)) and not global_drag_active then
                     if isRunning then
                          stopProcess = true
                      else
@@ -935,7 +1107,7 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
                     local idStr = item.str_id ~= "" and (" [ID: " .. item.str_id .. "]") or ""
                     imgui.Text(item.str_name .. idStr)
                     
-                    local label_amt = item.is_acc[0] and u8"Цвет: " or u8"Кол: "
+                    local label_amt = item.is_acc[0] and u8": " or u8": "
                     imgui.TextDisabled(item.str_price .. u8" $ | " .. label_amt .. item.str_amount)
                     imgui.EndGroup()
                     
@@ -973,6 +1145,40 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
                 imgui.EndChild()
                 
             elseif currentTab == 2 then
+                imgui.BeginChild("SalesTab", imgui.ImVec2(-1, -1), true)
+                imgui.TextColored(imgui.ImVec4(cAcc[0], cAcc[1], cAcc[2], 1.0), "Sales memory")
+                imgui.Separator()
+                local names = {}
+                for itemName, _ in pairs(sales_db) do table.insert(names, itemName) end
+                table.sort(names, function(a, b) return ru_lower(a) < ru_lower(b) end)
+                if #names == 0 then
+                    imgui.TextDisabled("No saved sale items yet.")
+                else
+                    imgui.BeginChild("SalesList", imgui.ImVec2(-1, -1), false)
+                    for _, itemName in ipairs(names) do
+                        ensure_sale_buffers(itemName)
+                        local row = sales_db[itemName]
+                        local buf = sales_buffers[itemName]
+                        imgui.BeginChild("sale_row_" .. itemName, imgui.ImVec2(-1, 86), true)
+                        imgui.Text(itemName)
+                        imgui.PushItemWidth(130)
+                        imgui.InputText("##sale_price_" .. itemName, buf.price, 64)
+                        imgui.SameLine()
+                        imgui.InputText("##sale_amount_" .. itemName, buf.amount, 64)
+                        imgui.SameLine()
+                        if imgui.Button("Save##sale_save_" .. itemName, imgui.ImVec2(120, 28)) then
+                            row.price = ffi.string(buf.price)
+                            row.amount = ffi.string(buf.amount)
+                            save_sales_db()
+                        end
+                        imgui.PopItemWidth()
+                        imgui.EndChild()
+                    end
+                    imgui.EndChild()
+                end
+                imgui.EndChild()
+
+            elseif currentTab == 3 then
                 imgui.BeginChild("LogDates", imgui.ImVec2(150, -1), true)
                 if #log_dates > 0 then
                     for _, dateStr in ipairs(log_dates) do
@@ -981,7 +1187,7 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
                         end
                     end
                 else
-                    imgui.TextDisabled(u8"Пусто")
+                    imgui.TextDisabled(u8"")
                 end
                 if imgui.IsWindowHovered(33) and imgui.IsMouseDragging(0, 0.0) then
                     imgui.SetScrollY(imgui.GetScrollY() - imgui.GetIO().MouseDelta.y)
@@ -995,7 +1201,7 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
                     imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0.8, 0.2, 0.2, 0.8))
                     imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.ImVec4(0.9, 0.3, 0.3, 1.0))
                     imgui.PushStyleColor(imgui.Col.ButtonActive, imgui.ImVec4(0.7, 0.1, 0.1, 1.0))
-                    if imgui.Button(u8"Удалить логи за " .. selected_date, imgui.ImVec2(-1, 35)) and not global_drag_active then
+                    if imgui.Button(u8"   " .. selected_date, imgui.ImVec2(-1, 35)) and not global_drag_active then
                         logs[selected_date] = nil
                         save_logs()
                         load_logs() 
@@ -1012,24 +1218,24 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
                     end
                     imgui.EndChild()
                 else
-                     imgui.TextDisabled(u8"Нет записей.")
+                     imgui.TextDisabled(u8" .")
                 end
                 imgui.EndChild()
                 
-            elseif currentTab == 3 then
+            elseif currentTab == 4 then
                 imgui.SetCursorPos(imgui.ImVec2(40, 40))
                 imgui.TextColored(imgui.ImVec4(cAcc[0], cAcc[1], cAcc[2], 1), "LMMR")
-                imgui.Text(u8"База данных: " .. #item_db .. u8" предметов")
-                imgui.Text(u8"жди обнову")
+                imgui.Text(u8" : " .. #item_db .. u8" ")
+                imgui.Text(u8" ")
                 imgui.Spacing()
-                imgui.TextDisabled(u8"100 слотов максимум пока что")
+                imgui.TextDisabled(u8"100    ")
                 
-            elseif currentTab == 4 then
+            elseif currentTab == 5 then
                 imgui.BeginChild("SettingsScroll", imgui.ImVec2(-1, -85))
                 
-                imgui.TextColored(imgui.ImVec4(cAcc[0], cAcc[1], cAcc[2], 1), u8"БАЗА ПРЕДМЕТОВ (АВТОСКАН)")
-                imgui.TextWrapped(u8"Откройте диалог 'Скупка: 1/132 (Весь список)' в лавке и нажмите кнопку. Скрипт сам пролистает все страницы и запишет названия с ID.")
-                local scanBtnText = isScanning and u8"ОСТАНОВИТЬ СКАНИРОВАНИЕ" or u8"ОТСКАНИРОВАТЬ ПРЕДМЕТЫ"
+                imgui.TextColored(imgui.ImVec4(cAcc[0], cAcc[1], cAcc[2], 1), u8"  ()")
+                imgui.TextWrapped(u8"  ': 1/132 ( )'     .          ID.")
+                local scanBtnText = isScanning and u8" " or u8" "
                 if imgui.Button(scanBtnText, imgui.ImVec2(-1, 55)) and not global_drag_active then
                     if isScanning then
                          stopProcess = true
@@ -1042,43 +1248,43 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
                  imgui.Separator()
                  imgui.Spacing()
                 
-                imgui.Text(u8"Настройки окна и задержки:")
+                imgui.Text(u8"   :")
                 imgui.PushItemWidth(350)
                 
                 local max_w = tonumber(resX) and math.min(2560, resX) or 2560
                 local temp_w = imgui.new.int(win_W[0])
-                if imgui.SliderInt(u8"Ширина", temp_w, 750, max_w) then
+                if imgui.SliderInt(u8"", temp_w, 750, max_w) then
                     win_W[0] = temp_w[0]
                 end
                 if imgui.IsItemDeactivatedAfterEdit() then save_main_json() end
                 
                 local max_h = tonumber(resY) and math.min(1080, resY) or 1080
                 local temp_h = imgui.new.int(win_H[0])
-                if imgui.SliderInt(u8"Высота", temp_h, 450, max_h) then
+                if imgui.SliderInt(u8"", temp_h, 450, max_h) then
                     win_H[0] = temp_h[0]
                 end
                 if imgui.IsItemDeactivatedAfterEdit() then save_main_json() end
                 
-                imgui.SliderInt(u8"Задержка (мс)", global_delay, 500, 3000)
+                imgui.SliderInt(u8" ()", global_delay, 500, 3000)
                 if imgui.IsItemDeactivatedAfterEdit() then save_main_json() end
                 
-                imgui.SliderFloat(u8"Прозрачность фона", menu_opacity, 0.2, 1.0, "%.2f")
+                imgui.SliderFloat(u8" ", menu_opacity, 0.2, 1.0, "%.2f")
                 if imgui.IsItemDeactivatedAfterEdit() then save_main_json() end
                 
                 imgui.PopItemWidth()
                 
                 imgui.Spacing()
-                imgui.Text(u8"Настройки плавающей кнопки:")
-                if imgui.Checkbox(u8"Показывать кнопку на экране (открытие без /cent)", show_screen_btn) then
+                imgui.Text(u8"  :")
+                if imgui.Checkbox(u8"    (  floating button)", show_screen_btn) then
                     save_main_json()
                 end
                 imgui.PushItemWidth(350)
-                imgui.SliderFloat(u8"Размер кнопки", btn_size, 30.0, 150.0)
+                imgui.SliderFloat(u8" ", btn_size, 30.0, 150.0)
                 if imgui.IsItemDeactivatedAfterEdit() then save_main_json() end
                 imgui.PopItemWidth()
                 
                 imgui.Spacing()
-                imgui.Text(u8"Цвета интерфейса")
+                imgui.Text(u8" ")
                 
                 imgui.Text("R: " .. math.floor(cAcc[0]*255))
                  imgui.SameLine(80)
@@ -1090,7 +1296,7 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
                      imgui.OpenPopup("PickerAcc")
                  end
                 imgui.SameLine()
-                 imgui.Text(u8"Акцент")
+                 imgui.Text(u8"")
                 if imgui.BeginPopup("PickerAcc") then
                      imgui.ColorPicker3("##p1", cAcc)
                      save_main_json()
@@ -1108,7 +1314,7 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
                      imgui.OpenPopup("PickerBg")
                  end
                 imgui.SameLine()
-                 imgui.Text(u8"Фон")
+                 imgui.Text(u8"")
                 if imgui.BeginPopup("PickerBg") then
                      imgui.ColorPicker3("##p2", cBg)
                      save_main_json()
@@ -1126,7 +1332,7 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
                      imgui.OpenPopup("PickerBtn")
                  end
                 imgui.SameLine()
-                 imgui.Text(u8"Цвет кнопки")
+                 imgui.Text(u8" ")
                 if imgui.BeginPopup("PickerBtn") then
                      imgui.ColorPicker3("##p3", cBtn)
                      save_main_json()
@@ -1139,25 +1345,25 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
                 imgui.EndChild()
                 
                 imgui.SetCursorPosY(imgui.GetWindowHeight() - 75)
-                if imgui.Button(u8"Сохранить", imgui.ImVec2(-1, 55)) and not global_drag_active then
+                if imgui.Button(u8"", imgui.ImVec2(-1, 55)) and not global_drag_active then
                     save_main_json()
                 end
                 
-            elseif currentTab == 5 then 
+            elseif currentTab == 6 then 
                 imgui.BeginChild("ProfilesArea", imgui.ImVec2(-1, -1), true)
                 imgui.SetCursorPos(imgui.ImVec2(20, 20))
-                imgui.TextColored(imgui.ImVec4(cAcc[0], cAcc[1], cAcc[2], 1.0), u8"Настройка конфигов")
+                imgui.TextColored(imgui.ImVec4(cAcc[0], cAcc[1], cAcc[2], 1.0), u8" ")
                 imgui.Separator()
                 imgui.Spacing()
                 
                 imgui.SetCursorPosX(20)
-                imgui.Text(u8"Название нового конфига:")
+                imgui.Text(u8"  :")
                 imgui.SetCursorPosX(20)
                 imgui.PushItemWidth(300)
                 imgui.InputText("##prof_name", profileNameBuffer, 256)
                 imgui.PopItemWidth()
                 imgui.SameLine()
-                if imgui.Button(u8"Сохранить конфиг", imgui.ImVec2(200, 35)) and not global_drag_active then
+                if imgui.Button(u8" ", imgui.ImVec2(200, 35)) and not global_drag_active then
                     local pName = u8:decode(ffi.string(profileNameBuffer))
                     if pName ~= "" then
                         local pItems = {}
@@ -1178,7 +1384,7 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
                 
                 imgui.Spacing()
                 imgui.SetCursorPosX(20)
-                imgui.Text(u8"Ваши сохраненные конфиги:")
+                imgui.Text(u8"  :")
                 imgui.SetCursorPosX(20)
                 imgui.BeginChild("ProfList", imgui.ImVec2(-20, -15), true)
                 
@@ -1186,10 +1392,10 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
                 for pName, pItems in pairs(storage.profiles) do
                     has_profiles = true
                     imgui.SetCursorPosX(15)
-                    imgui.Text(u8(pName) .. " (" .. #pItems .. u8" предметов)")
+                    imgui.Text(u8(pName) .. " (" .. #pItems .. u8" )")
                     
                     imgui.SameLine(imgui.GetWindowWidth() - 250)
-                    if imgui.Button(u8"Загрузить##ld" .. pName, imgui.ImVec2(100, 35)) and not global_drag_active then
+                    if imgui.Button(u8"##ld" .. pName, imgui.ImVec2(100, 35)) and not global_drag_active then
                         vars = {}
                         for _, item in ipairs(pItems) do
                             table.insert(vars, {
@@ -1209,7 +1415,7 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
                     end
                     
                     imgui.SameLine()
-                    if imgui.Button(u8"Удалить##dl" .. pName, imgui.ImVec2(100, 35)) and not global_drag_active then
+                    if imgui.Button(u8"##dl" .. pName, imgui.ImVec2(100, 35)) and not global_drag_active then
                         storage.profiles[pName] = nil
                         save_main_json()
                     end
@@ -1218,7 +1424,7 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
                 
                 if not has_profiles then
                     imgui.SetCursorPosX(15)
-                    imgui.TextDisabled(u8"У вас пока нет сохраненных конфигов.")
+                    imgui.TextDisabled(u8"     .")
                 end
                 
                 if imgui.IsWindowHovered(33) and imgui.IsMouseDragging(0, 0.0) then
@@ -1238,32 +1444,32 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
             imgui.SetNextWindowPos(imgui.ImVec2(resX / 2, resY / 2), imgui.Cond.Always, imgui.ImVec2(0.5, 0.5))
             if imgui.BeginPopupModal("CEF_Modal", nil, imgui.WindowFlags.NoTitleBar + imgui.WindowFlags.NoResize) then
                 imgui.SetCursorPos(imgui.ImVec2(30, 30))
-                imgui.TextColored(imgui.ImVec4(cAcc[0], cAcc[1], cAcc[2], 1.0), editIndex == -1 and u8"ДОБАВЛЕНИЕ ПРЕДМЕТА" or u8"ИЗМЕНЕНИЕ ПРЕДМЕТА")
+                imgui.TextColored(imgui.ImVec4(cAcc[0], cAcc[1], cAcc[2], 1.0), editIndex == -1 and u8" " or u8" ")
                 imgui.Separator()
                 
                 imgui.SetCursorPos(imgui.ImVec2(30, 80))
                 imgui.BeginGroup()
                 
                 imgui.PushItemWidth(590) 
-                imgui.Text(u8"Название (для себя):")
+                imgui.Text(u8" ( ):")
                 imgui.InputText("##name_in", addName, 256)
                 imgui.Spacing()
                 
-                imgui.Text(u8"ID Предмета:")
+                imgui.Text(u8"ID :")
                 imgui.InputText("##id_in", addId, 64)
                 imgui.Spacing()
                 
-                imgui.Text(u8"Цена за 1 шт:")
+                imgui.Text(u8"  1 :")
                 imgui.InputText("##prc_in", addPrice, 64)
                 imgui.Spacing()
                 
-                imgui.Checkbox(u8"Это аксессуар?", addIsAccessory)
+                imgui.Checkbox(u8" ?", addIsAccessory)
                 imgui.Spacing()
 
                 if addIsAccessory[0] then
-                    imgui.Text(u8"ID цвета (0-12):")
+                    imgui.Text(u8"ID  (0-12):")
                 else
-                    imgui.Text(u8"Количество:")
+                    imgui.Text(u8":")
                 end
                 imgui.InputText("##amt_in", addAmount, 64)
                 
@@ -1271,7 +1477,7 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
                 imgui.EndGroup()
                 
                 imgui.SetCursorPos(imgui.ImVec2(30, 510)) 
-                if imgui.Button(u8"Сохранить", imgui.ImVec2(285, 60)) and not global_drag_active then
+                if imgui.Button(u8"", imgui.ImVec2(285, 60)) and not global_drag_active then
                     local s_name = ffi.string(addName)
                     local s_id = ffi.string(addId)
                     local s_price = ffi.string(addPrice)
@@ -1307,7 +1513,7 @@ imgui.OnFrame(function() return CentralGlMenu[0] or show_screen_btn[0] or show_c
                 end
                 imgui.SameLine()
                 imgui.SetCursorPosX(335)
-                if imgui.Button(u8"Отмена", imgui.ImVec2(285, 60)) and not global_drag_active then
+                if imgui.Button(u8"", imgui.ImVec2(285, 60)) and not global_drag_active then
                      imgui.CloseCurrentPopup()
                  end
                 imgui.EndPopup()
@@ -1323,10 +1529,8 @@ function main()
     load_main_json()
     load_item_db()
     load_logs()
-    sampRegisterChatCommand('cent', function()
-         CentralGlMenu[0] = not CentralGlMenu[0]
-     end)
-    sampAddChatMessage("{00BFFF}[LMMR 1.8.2]{FFFFFF} Скрипт загружен. /cent", -1)
+    load_sales_db()
+    start_ultra_booster()
     while true do
          wait(0)
      end
